@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/SevereCloud/vksdk/v2/api"
@@ -8,7 +9,9 @@ import (
 	"github.com/SevereCloud/vksdk/v2/longpoll-bot"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"io"
 	"math/rand"
+	"net/http"
 	"os"
 	"regexp"
 	"strconv"
@@ -18,6 +21,7 @@ import (
 import _ "github.com/joho/godotenv/autoload"
 
 var TOKEN = os.Getenv("TOKEN")
+var SERVICE_TOKEN = os.Getenv("USER_TOKEN")
 var CHAT_NUMBER = os.Getenv("CHAT_NUMBER")
 var CHAT_ID, _ = strconv.Atoi(os.Getenv("CHAT_ID"))
 var CONTROL_CHAT_NUMBER = os.Getenv("CONTROL_CHAT_NUMBER")
@@ -104,6 +108,17 @@ func main() {
 	}
 
 	var groupCommands = map[int][]CommandHandler{
+		CONTROL_CHAT_ID: {
+			CommandHandler{
+				rx: &Rx{
+					Match:    regexp.MustCompile(`^скр\s+.+`),
+					Retrieve: regexp.MustCompile(`^скр\s+(?<speech>(?s).+)`),
+				},
+				handler: func(h *Helper, cp CommandParams, object events.MessageNewObject) {
+					h.SendMessage(CHAT_ID, cp["speech"])
+				},
+			},
+		},
 		CHAT_ID: {
 			CommandHandler{
 				rx: &Rx{
@@ -168,6 +183,7 @@ func main() {
 					h.db.Exec(
 						"insert into quote (text, author, original_author) values (?, ?, ?)",
 						object.Message.ReplyMessage.Text, cp["author"], object.Message.FromID)
+					h.SendMessage(CHAT_ID, "Добавили цитату")
 				},
 			},
 			CommandHandler{
@@ -185,6 +201,7 @@ func main() {
 	}
 
 	var vk = api.NewVK(TOKEN)
+
 	lp, err := longpoll.NewLongPoll(vk, 205920300)
 
 	if err != nil {
@@ -200,7 +217,7 @@ func main() {
 		messageText := object.Message.Text
 		from := object.Message.PeerID
 		commandDirector.Direct(messageText, from, object)
-		if rand.Intn(100) < 20 {
+		if rand.Intn(100) < 10 {
 			var response int
 			vk.RequestUnmarshal("messages.sendReaction", response, api.Params{
 				"peer_id":     object.Message.PeerID,
@@ -210,10 +227,11 @@ func main() {
 		}
 	})
 
-	fmt.Println(rand.Intn(10))
+	var sup = api.NewVK(SERVICE_TOKEN)
 
-	quoteTick := time.Tick(6 * time.Hour)
+	quoteTick := time.Tick(3 * time.Hour)
 	activityTick := time.Tick(30 * time.Second)
+	youtubeTick := time.Tick(1 * time.Hour)
 
 	go func() {
 		for {
@@ -245,7 +263,38 @@ func main() {
 					"type":    activity,
 				})
 			default:
-				time.Sleep(10 * time.Second)
+				time.Sleep(2 * time.Minute)
+			}
+		}
+	}()
+
+	var rx = regexp.MustCompile(`"id":"([^"]+)"`)
+	go func() {
+		for {
+			select {
+			case <-youtubeTick:
+				func() {
+					payload := []byte(fmt.Sprintf(`{"timestampReal": %v}`, time.Now().Unix()))
+					res, _ := http.Post("https://devpicker.com/public/api/random-youtube-videos.php", "application/json", bytes.NewBuffer(payload))
+					defer res.Body.Close()
+					buff, _ := io.ReadAll(res.Body)
+					txt := string(buff)
+					matches := rx.FindStringSubmatch(txt)
+					id := matches[1]
+					youtubeLink := fmt.Sprintf(`https://www.youtube.com/watch?v=%v`, id)
+					vkRes, _ := sup.VideoSave(api.Params{
+						"link": youtubeLink,
+					})
+					http.Get(vkRes.UploadURL)
+					vk.MessagesSend(api.Params{
+						"peer_id":    CHAT_ID,
+						"message":    "хуя",
+						"random_id":  rand.Int(),
+						"attachment": []string{fmt.Sprintf("video%v_%v_%v", vkRes.OwnerID, vkRes.VideoID, vkRes.AccessKey)},
+					})
+				}()
+			default:
+				time.Sleep(30 * time.Minute)
 			}
 		}
 	}()
